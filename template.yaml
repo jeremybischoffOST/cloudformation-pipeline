@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Live voting app: a serverless web application built with an AWS Lambda
+  function (with a public function URL) and an Amazon DynamoDB table.
+  Everybody who opens the URL can vote and sees the results live.
+
+Parameters:
+  # Set by the deploy stage of the pipeline: every commit uploads its own
+  # ZIP file, so CloudFormation detects code changes and updates the function.
+  CodeBucket:
+    Type: String
+    Description: S3 bucket that contains the ZIP file with the Lambda code
+  CodeKey:
+    Type: String
+    Description: Path of the ZIP file with the Lambda code in the S3 bucket
+
+Resources:
+  # NoSQL table that stores one item per answer: { option: "Pizza", votes: 7 }.
+  # Billed per request, so there is no capacity to configure.
+  VotesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: option
+          AttributeType: S
+      KeySchema:
+        - AttributeName: option
+          KeyType: HASH
+
+  # The web application. The Node.js code (src/index.mjs) is zipped by the
+  # build stage and uploaded to S3 by the deploy stage of the pipeline.
+  # GET  -> renders the voting page with the current results
+  # POST -> counts a vote and redirects back to the page
+  VotingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Timeout: 10
+      # The AWS Academy Learner Lab does not allow creating IAM roles,
+      # so the function runs with the existing LabRole.
+      Role: !Sub arn:aws:iam::${AWS::AccountId}:role/LabRole
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref VotesTable
+          # Change the question or the options here, commit and push.
+          QUESTION: Welches Mensa-Menu ist das beste?
+          OPTIONS: Pizza,Pasta,Curry,Salat
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+
+  # Public HTTPS endpoint for the function (no API Gateway needed).
+  VotingFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref VotingFunction
+      AuthType: NONE
+
+  # Allow anonymous users to call the function through its URL.
+  VotingFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VotingFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  VotingFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VotingFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  VotingURL:
+    Description: Open this URL in a browser and share it to vote
+    Value: !GetAtt VotingFunctionUrl.FunctionUrl
+  TableName:
+    Description: DynamoDB table that stores the votes
+    Value: !Ref VotesTable
