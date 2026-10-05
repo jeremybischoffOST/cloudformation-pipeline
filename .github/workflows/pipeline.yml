@@ -1,0 +1,112 @@
+# CI/CD pipeline for the live voting app.
+#
+#   build  -> install dependencies, check the template, zip the Lambda code
+#   test   -> run the unit tests
+#   deploy -> upload the ZIP file to S3 and deploy the CloudFormation stack
+#             (only for pushes to main, not for pull requests)
+name: Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: voting
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint CloudFormation template
+        run: |
+          pip install cfn-lint
+          cfn-lint template.yaml
+
+      - name: Build Lambda package
+        run: npm run build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: function
+          path: dist/function.zip
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Never run two deployments of the same stack at the same time.
+    concurrency: deploy-${{ github.ref }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: function
+          path: dist
+
+      # Temporary credentials of the AWS Academy Learner Lab ("AWS Details"
+      # -> "AWS CLI"). They expire with the lab session and must be renewed.
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create artifact bucket if needed
+        run: |
+          BUCKET="voting-artifacts-$(aws sts get-caller-identity --query Account --output text)"
+          aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null || aws s3 mb "s3://$BUCKET"
+          echo "BUCKET=$BUCKET" >> "$GITHUB_ENV"
+
+      # Each commit gets its own key, so CloudFormation notices the new code.
+      - name: Upload Lambda package
+        run: |
+          KEY="voting/function-${GITHUB_SHA}.zip"
+          aws s3 cp dist/function.zip "s3://$BUCKET/$KEY"
+          echo "KEY=$KEY" >> "$GITHUB_ENV"
+
+      - name: Deploy CloudFormation stack
+        run: |
+          aws cloudformation deploy \
+            --template-file template.yaml \
+            --stack-name "$STACK_NAME" \
+            --parameter-overrides "CodeBucket=$BUCKET" "CodeKey=$KEY" \
+            --no-fail-on-empty-changeset
+
+      - name: Smoke test
+        run: |
+          URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='VotingURL'].OutputValue" --output text)
+          echo "Voting app: $URL" >> "$GITHUB_STEP_SUMMARY"
+          curl --fail --silent --show-error --retry 5 --retry-all-errors "$URL" | grep "<title>Live Voting</title>"
