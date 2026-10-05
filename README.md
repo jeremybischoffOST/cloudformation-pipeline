@@ -1,5 +1,5 @@
 # CI/CD Pipeline for a CloudFormation Stack using GitHub Actions
-
+test
 This exercise builds on the live voting app from the [CloudFormation exercise](https://gitlab.com/fritsche-ost/cloudformation-stack).
 Instead of creating the stack by hand, a GitHub Actions pipeline builds, tests and deploys the application on every push.
 
